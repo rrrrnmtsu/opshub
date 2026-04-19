@@ -51,7 +51,13 @@ done
 
 cat > "$MACOS_DIR/opshub-launcher" <<'LAUNCHER'
 #!/usr/bin/env bash
-# opshub.app entry point. Opens a new Terminal window and runs `opshub tui`.
+# opshub.app entry point. Opens the user's preferred terminal emulator and
+# runs `opshub tui ...`. We prefer Ghostty (the terminal most of our users
+# actually live in) and fall back to Apple's Terminal.app so the bundle
+# works on a stock macOS install too.
+#
+# Override the default with OPSHUB_LAUNCHER_TERM=<ghostty|terminal|iterm>.
+# Override the default agent list by editing the CMD line at the bottom.
 set -euo pipefail
 
 BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -78,12 +84,52 @@ fi
 
 CMD="'$BIN' tui __AGENT_FLAGS__"
 
-/usr/bin/osascript <<APPLESCRIPT
+# Detect the preferred terminal. Env var wins; otherwise we auto-detect by
+# checking which apps exist under /Applications, in priority order.
+choose_term() {
+    if [ -n "${OPSHUB_LAUNCHER_TERM:-}" ]; then
+        echo "$OPSHUB_LAUNCHER_TERM"
+        return
+    fi
+    if [ -d "/Applications/Ghostty.app" ]; then
+        echo ghostty
+    elif [ -d "/Applications/WezTerm.app" ]; then
+        echo wezterm
+    elif [ -d "/Applications/iTerm.app" ]; then
+        echo iterm
+    else
+        echo terminal
+    fi
+}
+
+TERM_CHOICE="$(choose_term)"
+
+case "$TERM_CHOICE" in
+    ghostty)
+        # Ghostty on macOS requires `open -na` because a bare `ghostty -e`
+        # isn't a supported invocation on the Mac build.
+        exec /usr/bin/open -na Ghostty.app --args -e "$CMD"
+        ;;
+    wezterm)
+        exec /usr/bin/open -na WezTerm.app --args start -- sh -c "$CMD"
+        ;;
+    iterm)
+        /usr/bin/osascript <<APPLESCRIPT
+tell application "iTerm"
+    activate
+    create window with default profile command "$CMD"
+end tell
+APPLESCRIPT
+        ;;
+    terminal|*)
+        /usr/bin/osascript <<APPLESCRIPT
 tell application "Terminal"
     activate
     do script "$CMD"
 end tell
 APPLESCRIPT
+        ;;
+esac
 LAUNCHER
 # shellcheck disable=SC2016
 sed -i '' "s| __AGENT_FLAGS__| ${AGENT_FLAGS# }|" "$MACOS_DIR/opshub-launcher"
