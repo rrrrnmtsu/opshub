@@ -2,11 +2,20 @@ use anyhow::{Context, Result};
 use opshub_core::ansi;
 use opshub_core::event::{Event, EventKind};
 use opshub_core::Storage;
+use opshub_parsers::claude::ClaudeTranscriptTailer;
+use opshub_parsers::codex::CodexSessionTailer;
+use opshub_parsers::{CostSample, Engine, Tailer};
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc as stdmpsc, Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
+
+// Re-exported so downstream consumers can match on tailer output without
+// pulling opshub-parsers in themselves.
+pub use opshub_parsers::CostSample as RunnerCostSample;
 
 use crate::profile::{AgentProfile, WinSize};
 
@@ -17,6 +26,9 @@ pub enum RunnerEvent {
     /// Raw bytes read from the PTY master (mixture of stdout + stderr - PTYs
     /// merge them unless the child cooperates).
     Output(bytes::Bytes),
+    /// One observed token-usage sample from the upstream CLI's own logs.
+    /// Emitted by the engine-specific tailer thread, not by PTY parsing.
+    Cost(CostSample),
     /// Child process exited with the given status (portable-pty exposes a u32;
     /// we keep it as-is).
     Exited(u32),
@@ -167,9 +179,23 @@ pub fn spawn_agent(profile: AgentProfile, storage: Storage, win: WinSize) -> Res
         })
         .context("spawn bridge thread")?;
 
+    // Engine-specific token/cost tailer. We pick a JSONL tailer based on the
+    // profile's `kind` — PTY byte parsing is too brittle across CLI versions,
+    // whereas each CLI's own structured log is a stable interface.
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let launch_ts_ms = opshub_core::event::now_ms();
+    let tailer_handle = start_tailer(
+        &profile,
+        session_id.clone(),
+        launch_ts_ms,
+        storage.clone(),
+        tx.clone(),
+        stop_flag.clone(),
+    );
+
     // Child waiter: wait on the process, then drain reader + bridge before
     // emitting Exited. Ordering: child -> reader EOF -> byte_tx dropped ->
-    // bridge recv Err -> bridge exits -> Exited event fires.
+    // bridge recv Err -> bridge exits -> tailer stops -> Exited event fires.
     let tx_for_exit = tx.clone();
     let session_for_exit = session_id.clone();
     let storage_for_exit = storage.clone();
@@ -179,6 +205,10 @@ pub fn spawn_agent(profile: AgentProfile, storage: Storage, win: WinSize) -> Res
             let status = child.wait();
             let _ = reader_handle.join();
             let _ = bridge_handle.join();
+            stop_flag.store(true, Ordering::Relaxed);
+            if let Some(h) = tailer_handle {
+                let _ = h.join();
+            }
             let code = match status {
                 Ok(s) => s.exit_code(),
                 Err(e) => {
@@ -198,6 +228,67 @@ pub fn spawn_agent(profile: AgentProfile, storage: Storage, win: WinSize) -> Res
         master,
         win,
     })
+}
+
+/// Spawn a tailer thread for profile kinds we know how to parse. Returns
+/// `None` for `generic` agents so the overhead is only paid when it buys us
+/// something. The tailer polls once per second; faster polling would burn
+/// CPU for no perceptible benefit (turns are seconds to minutes apart).
+fn start_tailer(
+    profile: &AgentProfile,
+    session_id: String,
+    launch_ts_ms: i64,
+    storage: Storage,
+    tx: broadcast::Sender<RunnerEvent>,
+    stop: Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    let engine = Engine::from_kind(&profile.kind)?;
+    let cwd = profile
+        .cwd
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    let mut tailer: Box<dyn Tailer> = match engine {
+        Engine::ClaudeCode => Box::new(ClaudeTranscriptTailer::new(
+            session_id.clone(),
+            &cwd,
+            launch_ts_ms,
+        )),
+        Engine::Codex => Box::new(CodexSessionTailer::new(session_id.clone(), launch_ts_ms)),
+    };
+    let thread_name = format!("opshub-cost-{}", profile.id);
+    std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                match tailer.next() {
+                    Ok(Some(sample)) => {
+                        if let Err(e) = storage.insert_cost_event(
+                            &session_id,
+                            sample.ts_ms,
+                            &sample.model,
+                            sample.input_tok,
+                            sample.output_tok,
+                            sample.cache_read,
+                            sample.cache_write,
+                            sample.usd_estimate,
+                        ) {
+                            warn!(error = %e, "storage insert_cost_event failed");
+                        }
+                        let _ = tx.send(RunnerEvent::Cost(sample));
+                    }
+                    Ok(None) => {
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "cost tailer poll failed");
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                }
+            }
+            debug!("cost tailer exited");
+        })
+        .ok()
 }
 
 #[cfg(test)]
@@ -226,6 +317,7 @@ mod tests {
                 match rx.recv().await {
                     Ok(RunnerEvent::Exited(c)) => return c,
                     Ok(RunnerEvent::Output(_)) => continue,
+                    Ok(RunnerEvent::Cost(_)) => continue,
                     Err(_) => return u32::MAX,
                 }
             }

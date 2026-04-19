@@ -4,4 +4,4 @@ pub mod paths;
 pub mod storage;
 
 pub use event::{Event, EventKind};
-pub use storage::Storage;
+pub use storage::{CostSummary, Storage};

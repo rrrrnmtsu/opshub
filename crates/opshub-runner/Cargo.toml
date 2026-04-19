@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 opshub-core = { path = "../opshub-core" }
+opshub-parsers = { path = "../opshub-parsers" }
 anyhow.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true }

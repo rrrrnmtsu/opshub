@@ -8,9 +8,10 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures_util::StreamExt;
-use opshub_runner::{RunnerEvent, RunningAgent, WinSize};
+use opshub_runner::{CostSample, RunnerEvent, RunningAgent, WinSize};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use std::collections::VecDeque;
 use std::io::Stdout;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -20,6 +21,10 @@ use crate::grid;
 use crate::ui;
 
 const SCROLLBACK_LINES: usize = 2000;
+/// Rolling window over which `tok/s` is averaged. 60 seconds is short enough
+/// to react to a burst but long enough that typing pauses don't dunk the
+/// number to zero mid-turn.
+const TOK_WINDOW_SECS: i64 = 60;
 
 pub struct AppOptions {
     pub agents: Vec<RunningAgent>,
@@ -31,17 +36,73 @@ pub struct AgentView {
     pub label: String,
     pub buffer: LineBuffer,
     pub exit_code: Option<u32>,
+    pub cost: CostAgg,
+}
+
+/// Per-agent accumulator for the live cost header. Token counts older than
+/// [`TOK_WINDOW_SECS`] age out so the `tok/s` reading always reflects recent
+/// activity.
+#[derive(Default)]
+pub struct CostAgg {
+    pub usd_total: f64,
+    pub model: Option<String>,
+    pub window: VecDeque<(i64, i64)>,
+    pub tok_per_sec: f64,
+}
+
+impl CostAgg {
+    fn observe(&mut self, sample: &CostSample) {
+        self.usd_total += sample.usd_estimate;
+        self.model = Some(sample.model.clone());
+        self.window
+            .push_back((sample.ts_ms, sample.input_tok + sample.output_tok));
+        self.prune();
+        self.recompute();
+    }
+
+    /// Call every render tick so stale entries fall off even when no new
+    /// samples are arriving (otherwise tok/s would stick at the last value).
+    pub(crate) fn tick(&mut self) {
+        self.prune();
+        self.recompute();
+    }
+
+    fn prune(&mut self) {
+        let cutoff = now_ms() - TOK_WINDOW_SECS * 1000;
+        while let Some((ts, _)) = self.window.front() {
+            if *ts < cutoff {
+                self.window.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn recompute(&mut self) {
+        let total: i64 = self.window.iter().map(|(_, n)| n).sum();
+        self.tok_per_sec = total as f64 / TOK_WINDOW_SECS as f64;
+    }
 }
 
 pub struct AppState {
     pub agents: Vec<AgentView>,
     pub selected: usize,
     pub status: String,
+    pub show_metrics: bool,
 }
 
 enum AppMsg {
     Bytes { agent: usize, bytes: bytes::Bytes },
+    Cost { agent: usize, sample: CostSample },
     Exited { agent: usize, code: u32 },
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 pub async fn run(opts: AppOptions) -> Result<()> {
@@ -57,6 +118,7 @@ pub async fn run(opts: AppOptions) -> Result<()> {
                 label: a.profile.id.clone(),
                 buffer: LineBuffer::new(SCROLLBACK_LINES),
                 exit_code: None,
+                cost: CostAgg::default(),
             })
             .collect(),
         selected: 0,
@@ -64,6 +126,7 @@ pub async fn run(opts: AppOptions) -> Result<()> {
             Some(p) => format!("db={p}"),
             None => String::new(),
         },
+        show_metrics: true,
     };
 
     // Fan each agent's broadcast into the app loop.
@@ -76,6 +139,11 @@ pub async fn run(opts: AppOptions) -> Result<()> {
                 match sub.recv().await {
                     Ok(RunnerEvent::Output(bytes)) => {
                         if tx.send(AppMsg::Bytes { agent: idx, bytes }).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(RunnerEvent::Cost(sample)) => {
+                        if tx.send(AppMsg::Cost { agent: idx, sample }).await.is_err() {
                             return;
                         }
                     }
@@ -100,6 +168,10 @@ pub async fn run(opts: AppOptions) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(50));
 
     let outcome: Result<()> = loop {
+        for view in state.agents.iter_mut() {
+            view.cost.tick();
+        }
+
         terminal
             .draw(|f| ui::render(f, &state))
             .context("draw frame")?;
@@ -110,6 +182,11 @@ pub async fn run(opts: AppOptions) -> Result<()> {
                 Some(AppMsg::Bytes { agent, bytes }) => {
                     if let Some(view) = state.agents.get_mut(agent) {
                         view.buffer.push_bytes(&bytes);
+                    }
+                }
+                Some(AppMsg::Cost { agent, sample }) => {
+                    if let Some(view) = state.agents.get_mut(agent) {
+                        view.cost.observe(&sample);
                     }
                 }
                 Some(AppMsg::Exited { agent, code }) => {
@@ -158,6 +235,13 @@ fn handle_key(
 
     if ctrl && matches!(key.code, KeyCode::Char('q')) {
         return Some(Ok(()));
+    }
+    // Ctrl-M toggles the cost/tok-per-sec row. We deliberately bind it to the
+    // control-qualified form so the plain 'm' keystroke still reaches the
+    // agent (otherwise typing prose into Claude Code would be miserable).
+    if ctrl && matches!(key.code, KeyCode::Char('m')) {
+        state.show_metrics = !state.show_metrics;
+        return None;
     }
     if matches!(key.code, KeyCode::Tab) && !ctrl {
         if !state.agents.is_empty() {
@@ -212,9 +296,10 @@ fn encode_key(key: KeyEvent) -> Option<Vec<u8>> {
 }
 
 fn resize_agents_for(agents: &mut [RunningAgent], screen_cols: u16, screen_rows: u16) {
-    // Reserve the same chrome the UI reserves: 1 row header + 1 row footer,
-    // plus the block border around each cell.
-    let body_rows = screen_rows.saturating_sub(2);
+    // Reserve the chrome the UI currently reserves. We assume metrics are
+    // visible (the default) because hiding them with Ctrl-M doesn't need a
+    // PTY resize — it just hands the row back to nobody for a frame.
+    let body_rows = screen_rows.saturating_sub(ui::HEADER_MAX_ROWS + 1);
     let cells = grid::tile(
         ratatui::layout::Rect::new(0, 0, screen_cols, body_rows),
         agents.len(),

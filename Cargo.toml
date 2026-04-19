@@ -2,13 +2,14 @@
 resolver = "2"
 members = [
     "crates/opshub-core",
+    "crates/opshub-parsers",
     "crates/opshub-runner",
     "crates/opshub-tui",
     "crates/opshub-cli",
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.3"
 edition = "2021"
 rust-version = "1.85"
 authors = ["rrrrnmtsu"]

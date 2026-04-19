@@ -2,7 +2,7 @@
 
 **AI agent orchestrator for the terminal.** Spawn Claude Code, Codex, Kimi, and friends in parallel, capture every byte they emit into a searchable SQLite store, and manage them from a single tmux pane.
 
-> Status: **v0.0.1 — scaffold.** PTY runner, storage, and CLI skeleton only. TUI grid, MCP server, and cost parsers land in upcoming slices (see [ROADMAP](#roadmap)).
+> Status: **v0.0.3 — cost parsers.** PTY runner + ratatui grid + live $ / tok/s header fed by Claude Code / Codex JSONL tailers. MCP server and hook bridge land in upcoming slices (see [ROADMAP](#roadmap)).
 
 ## Why another terminal-adjacent tool?
 
@@ -84,7 +84,7 @@ MVP slices (v0.0.x → v0.1.0):
 
 - [x] **v0.0.1**: workspace, schema + FTS5, PTY runner, echo E2E, `opshub launch|search|db-path`
 - [x] **v0.0.2**: ratatui N×M pane grid, keyboard routing, resize (`opshub tui --profile a.yaml --profile b.yaml`)
-- [ ] **v0.0.3**: Claude Code + Codex cost parsers, live $ / tok/s header
+- [x] **v0.0.3**: Claude Code + Codex cost parsers, live $ / tok/s header (toggle with `Ctrl-M`)
 - [ ] **v0.0.4**: `emit-to-opshub.sh` drop-in hook + `opshub emit` subcommand, Unix socket
 - [ ] **v0.0.5**: MCP server (`rmcp`): `list_agents`, `search_history`, `get_session_transcript`, `dispatch`, `get_cost_summary`
 - [ ] **v0.0.6**: claude-peers MCP subscriber → `agent_message` timeline

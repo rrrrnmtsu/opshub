@@ -708,7 +708,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opshub-cli"
-version = "0.0.1"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "opshub-core"
-version = "0.0.1"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "directories",
@@ -739,12 +739,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "opshub-parsers"
+version = "0.0.3"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "opshub-runner"
-version = "0.0.1"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "bytes",
  "opshub-core",
+ "opshub-parsers",
  "portable-pty",
  "serde",
  "serde_json",
@@ -759,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "opshub-tui"
-version = "0.0.1"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "bytes",

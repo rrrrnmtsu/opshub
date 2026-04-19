@@ -5,6 +5,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::event::{now_ms, Event, EventKind};
 
+/// Lightweight aggregate over `cost_event` for one session.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CostSummary {
+    pub usd_total: f64,
+    pub input_tok: i64,
+    pub output_tok: i64,
+}
+
 const SCHEMA_SQL: &str = include_str!("../migrations/0001_init.sql");
 
 /// Thin synchronous wrapper over a single SQLite connection.
@@ -95,6 +103,58 @@ impl Storage {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Persist one per-turn token usage sample to `cost_event`. Kept separate
+    /// from [`insert_event`] because the numeric columns are structured and
+    /// would be a bad fit for the generic event payload/text shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_cost_event(
+        &self,
+        session_id: &str,
+        ts_ms: i64,
+        model: &str,
+        input_tok: i64,
+        output_tok: i64,
+        cache_read: i64,
+        cache_write: i64,
+        usd_estimate: f64,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().expect("mutex poisoned");
+        conn.execute(
+            "INSERT INTO cost_event(session_id, ts, model, input_tok, output_tok, cache_read, cache_write, usd_estimate) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                session_id,
+                ts_ms,
+                model,
+                input_tok,
+                output_tok,
+                cache_read,
+                cache_write,
+                usd_estimate,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Aggregate spend + token counts for a session. Returns zero values when
+    /// no rows exist yet (rather than `None`) because the TUI always wants a
+    /// number it can render.
+    pub fn cost_summary(&self, session_id: &str) -> Result<CostSummary> {
+        let conn = self.conn.lock().expect("mutex poisoned");
+        let (usd, input_tok, output_tok): (Option<f64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT COALESCE(SUM(usd_estimate), 0.0), COALESCE(SUM(input_tok), 0), COALESCE(SUM(output_tok), 0) \
+                 FROM cost_event WHERE session_id = ?",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        Ok(CostSummary {
+            usd_total: usd.unwrap_or(0.0),
+            input_tok: input_tok.unwrap_or(0),
+            output_tok: output_tok.unwrap_or(0),
+        })
+    }
+
     /// FTS5-backed search; returns (event_id, session_id, ts, text snippet).
     ///
     /// The query is treated as a phrase by default (wrapped in `"..."`) so
@@ -172,6 +232,26 @@ mod tests {
 
         assert_eq!(s.count_events("sess-1", EventKind::Stdout).unwrap(), 1);
         assert_eq!(s.count_events("sess-1", EventKind::Stderr).unwrap(), 0);
+    }
+
+    #[test]
+    fn cost_event_roundtrip_and_summary() {
+        let s = Storage::open_in_memory().unwrap();
+        s.insert_agent("a", "claude_code", "{}").unwrap();
+        s.start_session("sess-c", "a", None, None, None).unwrap();
+
+        s.insert_cost_event("sess-c", 100, "claude-sonnet-4-6", 10, 5, 0, 0, 0.001)
+            .unwrap();
+        s.insert_cost_event("sess-c", 200, "claude-sonnet-4-6", 30, 20, 0, 0, 0.002)
+            .unwrap();
+
+        let summary = s.cost_summary("sess-c").unwrap();
+        assert_eq!(summary.input_tok, 40);
+        assert_eq!(summary.output_tok, 25);
+        assert!((summary.usd_total - 0.003).abs() < 1e-9);
+
+        let empty = s.cost_summary("no-such-session").unwrap();
+        assert_eq!(empty, CostSummary::default());
     }
 
     #[test]

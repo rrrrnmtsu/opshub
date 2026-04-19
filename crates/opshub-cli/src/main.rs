@@ -107,6 +107,15 @@ async fn main() -> Result<()> {
                             let _ = out.write_all(&bytes);
                             let _ = out.flush();
                         }
+                        Ok(RunnerEvent::Cost(sample)) => {
+                            tracing::info!(
+                                model = %sample.model,
+                                usd = sample.usd_estimate,
+                                input = sample.input_tok,
+                                output = sample.output_tok,
+                                "cost sample"
+                            );
+                        }
                         Ok(RunnerEvent::Exited(code)) => {
                             tracing::info!(code, "agent exited");
                             return code as i32;
