@@ -59,6 +59,25 @@ mkdir -p ~/.config/opshub/agents
 cp agents/claude-code.yaml agents/codex.yaml agents/_smoke.yaml ~/.config/opshub/agents/
 ```
 
+### macOS .app bundle
+
+For a Launchpad / Dock-native install, build a proper .app bundle and
+drop it into `/Applications`:
+
+```sh
+./scripts/build-macos-app.sh
+cp -R target/macos/opshub.app /Applications/
+```
+
+The bundle is a thin double-click shim — it opens Terminal.app and runs
+`opshub tui -a claude-code -a codex`. First launch seeds
+`~/.config/opshub/agents/` from the bundled profiles and symlinks
+`~/.local/bin/opshub` so CLI usage keeps working.
+
+Edit `/Applications/opshub.app/Contents/MacOS/opshub-launcher` if you
+want a different default agent set. The bundle is unsigned; the first
+launch may trigger Gatekeeper — right-click → **Open** once to approve.
+
 Homebrew tap and prebuilt binaries arrive with v0.1.0.
 
 ## Quick start
