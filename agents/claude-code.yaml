@@ -1,0 +1,4 @@
+id: claude-main
+kind: claude_code
+command: claude
+args: []

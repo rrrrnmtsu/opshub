@@ -1,0 +1,6 @@
+id: smoke
+kind: generic
+command: /bin/sh
+args:
+  - "-c"
+  - "printf 'opshubSmokeTest\\n'; printf 'anotherLine\\n'"

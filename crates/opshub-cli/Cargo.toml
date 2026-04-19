@@ -1,0 +1,22 @@
+[package]
+name = "opshub-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "opshub"
+path = "src/main.rs"
+
+[dependencies]
+opshub-core = { path = "../opshub-core" }
+opshub-runner = { path = "../opshub-runner" }
+anyhow.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_yaml.workspace = true
+clap = { workspace = true }
