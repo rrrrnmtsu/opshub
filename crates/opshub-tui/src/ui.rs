@@ -128,12 +128,8 @@ fn render_grid(frame: &mut Frame, area: Rect, state: &AppState) {
         frame.render_widget(block, *cell);
 
         let rows_available = inner.height as usize;
-        let lines: Vec<Line> = agent
-            .buffer
-            .tail(rows_available)
-            .into_iter()
-            .map(|s| Line::from(Span::raw(s.to_string())))
-            .collect();
+        let cols_available = inner.width as usize;
+        let lines = agent.screen.render_lines(rows_available, cols_available);
         frame.render_widget(Paragraph::new(lines), inner);
     }
 }

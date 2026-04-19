@@ -37,6 +37,7 @@ directories = "5"
 ratatui = "0.28"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures-util = "0.3"
+vt100 = "0.16"
 
 [profile.release]
 lto = "thin"

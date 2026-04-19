@@ -16,8 +16,8 @@ use std::io::Stdout;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::buffer::LineBuffer;
 use crate::grid;
+use crate::screen::Screen;
 use crate::ui;
 
 const SCROLLBACK_LINES: usize = 2000;
@@ -34,7 +34,7 @@ pub struct AppOptions {
 
 pub struct AgentView {
     pub label: String,
-    pub buffer: LineBuffer,
+    pub screen: Screen,
     pub exit_code: Option<u32>,
     pub cost: CostAgg,
 }
@@ -116,7 +116,7 @@ pub async fn run(opts: AppOptions) -> Result<()> {
             .iter()
             .map(|a| AgentView {
                 label: a.profile.id.clone(),
-                buffer: LineBuffer::new(SCROLLBACK_LINES),
+                screen: Screen::new(a.win.rows, a.win.cols, SCROLLBACK_LINES),
                 exit_code: None,
                 cost: CostAgg::default(),
             })
@@ -163,7 +163,12 @@ pub async fn run(opts: AppOptions) -> Result<()> {
     let mut events = EventStream::new();
 
     let initial = terminal.size().context("terminal size")?;
-    resize_agents_for(&mut agents, initial.width, initial.height);
+    resize_agents_for(
+        &mut agents,
+        &mut state.agents,
+        initial.width,
+        initial.height,
+    );
 
     let mut tick = tokio::time::interval(Duration::from_millis(50));
 
@@ -181,7 +186,14 @@ pub async fn run(opts: AppOptions) -> Result<()> {
             msg = rx.recv() => match msg {
                 Some(AppMsg::Bytes { agent, bytes }) => {
                     if let Some(view) = state.agents.get_mut(agent) {
-                        view.buffer.push_bytes(&bytes);
+                        let replies = view.screen.process(&bytes);
+                        if !replies.is_empty() {
+                            if let Some(a) = agents.get(agent) {
+                                if let Err(e) = a.write_input(&replies) {
+                                    tracing::warn!(error = %e, "terminal reply write failed");
+                                }
+                            }
+                        }
                     }
                 }
                 Some(AppMsg::Cost { agent, sample }) => {
@@ -206,7 +218,7 @@ pub async fn run(opts: AppOptions) -> Result<()> {
                     }
                 }
                 Some(Ok(Event::Resize(cols, rows))) => {
-                    resize_agents_for(&mut agents, cols, rows);
+                    resize_agents_for(&mut agents, &mut state.agents, cols, rows);
                 }
                 Some(Ok(_)) => {}
                 Some(Err(e)) => {
@@ -295,7 +307,16 @@ fn encode_key(key: KeyEvent) -> Option<Vec<u8>> {
     }
 }
 
-fn resize_agents_for(agents: &mut [RunningAgent], screen_cols: u16, screen_rows: u16) {
+/// Re-size both the PTY and the vt100 screen that mirrors it. The two
+/// *must* stay in lockstep: a mismatch makes alt-screen-based CLIs (codex,
+/// claude) paint into coordinates the parser doesn't know about, and the
+/// user sees garbled output.
+fn resize_agents_for(
+    agents: &mut [RunningAgent],
+    views: &mut [AgentView],
+    screen_cols: u16,
+    screen_rows: u16,
+) {
     // Reserve the chrome the UI currently reserves. We assume metrics are
     // visible (the default) because hiding them with Ctrl-M doesn't need a
     // PTY resize — it just hands the row back to nobody for a frame.
@@ -304,12 +325,13 @@ fn resize_agents_for(agents: &mut [RunningAgent], screen_cols: u16, screen_rows:
         ratatui::layout::Rect::new(0, 0, screen_cols, body_rows),
         agents.len(),
     );
-    for (agent, cell) in agents.iter_mut().zip(cells.iter()) {
+    for ((agent, view), cell) in agents.iter_mut().zip(views.iter_mut()).zip(cells.iter()) {
         let cols = cell.width.saturating_sub(2).max(2);
         let rows = cell.height.saturating_sub(2).max(2);
         if let Err(e) = agent.resize(WinSize { cols, rows }) {
             tracing::warn!(error = %e, agent = %agent.profile.id, "pty resize failed");
         }
+        view.screen.resize(rows, cols);
     }
 }
 
