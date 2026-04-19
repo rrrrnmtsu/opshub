@@ -1,5 +1,5 @@
 [package]
-name = "opshub-cli"
+name = "opshub-tui"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,17 +7,16 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[[bin]]
-name = "opshub"
-path = "src/main.rs"
-
 [dependencies]
 opshub-core = { path = "../opshub-core" }
 opshub-runner = { path = "../opshub-runner" }
-opshub-tui = { path = "../opshub-tui" }
 anyhow.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
-tracing-subscriber.workspace = true
-serde_yaml.workspace = true
-clap = { workspace = true }
+ratatui.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -68,6 +68,12 @@ opshub launch --command "/bin/sh -c 'echo hello from opshub'"
 # launch a declared profile
 opshub launch --profile agents/claude-code.yaml
 
+# spin up N agents side-by-side in a ratatui grid
+# (Tab cycles focus, Ctrl-Q quits)
+opshub tui \
+  --profile agents/claude-code.yaml \
+  --profile agents/codex.yaml
+
 # search every session you ever ran
 opshub search "authentication bug"
 ```
@@ -77,7 +83,7 @@ opshub search "authentication bug"
 MVP slices (v0.0.x → v0.1.0):
 
 - [x] **v0.0.1**: workspace, schema + FTS5, PTY runner, echo E2E, `opshub launch|search|db-path`
-- [ ] **v0.0.2**: ratatui N×M pane grid, keyboard routing, resize
+- [x] **v0.0.2**: ratatui N×M pane grid, keyboard routing, resize (`opshub tui --profile a.yaml --profile b.yaml`)
 - [ ] **v0.0.3**: Claude Code + Codex cost parsers, live $ / tok/s header
 - [ ] **v0.0.4**: `emit-to-opshub.sh` drop-in hook + `opshub emit` subcommand, Unix socket
 - [ ] **v0.0.5**: MCP server (`rmcp`): `list_agents`, `search_history`, `get_session_transcript`, `dispatch`, `get_cost_summary`

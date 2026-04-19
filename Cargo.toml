@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/opshub-core",
     "crates/opshub-runner",
+    "crates/opshub-tui",
     "crates/opshub-cli",
 ]
 
@@ -32,6 +33,9 @@ clap = { version = "4", features = ["derive"] }
 bytes = "1"
 regex = "1"
 directories = "5"
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures-util = "0.3"
 
 [profile.release]
 lto = "thin"

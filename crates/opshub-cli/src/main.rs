@@ -42,6 +42,13 @@ enum Cmd {
     },
     /// Print the database file path opshub will use.
     DbPath,
+    /// Launch one or more agents inside a ratatui grid. Tab cycles focus,
+    /// Ctrl-Q quits.
+    Tui {
+        /// YAML profile path. Repeat the flag to load multiple agents.
+        #[arg(short, long, required = true)]
+        profile: Vec<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -123,6 +130,21 @@ async fn main() -> Result<()> {
                     Ok(())
                 }
             }
+        }
+        Cmd::Tui { profile } => {
+            let storage = Storage::open(&db_path)?;
+            let mut agents = Vec::with_capacity(profile.len());
+            for path in &profile {
+                let p = resolve_profile(Some(path.clone()), None, None)?;
+                let running = spawn_agent(p, storage.clone(), WinSize::default())
+                    .with_context(|| format!("spawn {}", path.display()))?;
+                agents.push(running);
+            }
+            opshub_tui::run(opshub_tui::AppOptions {
+                agents,
+                db_label: Some(db_path.display().to_string()),
+            })
+            .await
         }
     }
 }
