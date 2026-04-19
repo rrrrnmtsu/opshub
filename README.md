@@ -50,7 +50,13 @@ Nothing published yet. Build from source:
 git clone https://github.com/rrrrnmtsu/opshub.git
 cd opshub
 cargo build --release
-./target/release/opshub --help
+
+# drop the binary somewhere on PATH
+install -m 0755 target/release/opshub ~/.local/bin/opshub
+
+# install the bundled profiles so `opshub tui -a claude-code -a codex` works
+mkdir -p ~/.config/opshub/agents
+cp agents/claude-code.yaml agents/codex.yaml agents/_smoke.yaml ~/.config/opshub/agents/
 ```
 
 Homebrew tap and prebuilt binaries arrive with v0.1.0.
@@ -58,25 +64,32 @@ Homebrew tap and prebuilt binaries arrive with v0.1.0.
 ## Quick start
 
 ```sh
-# print where opshub will keep its database
+# verify the install
+opshub --version
 opshub db-path
+opshub agents        # list profiles found under ~/.config/opshub/agents
 
-# launch an agent (adhoc command). PTY output mirrors to your terminal AND
-# streams into SQLite.
+# one-off adhoc command — PTY output mirrors to your terminal AND streams
+# into SQLite.
 opshub launch --command "/bin/sh -c 'echo hello from opshub'"
 
-# launch a declared profile
-opshub launch --profile agents/claude-code.yaml
+# smoke test (prints two lines, exits 0)
+opshub launch -a _smoke
 
-# spin up N agents side-by-side in a ratatui grid
-# (Tab cycles focus, Ctrl-Q quits)
-opshub tui \
-  --profile agents/claude-code.yaml \
-  --profile agents/codex.yaml
+# spin up N agents side-by-side in a ratatui grid.
+# Tab / Shift-Tab cycles focus, Ctrl-M toggles the $ / tok/s header,
+# Ctrl-Q quits. Agent names resolve against ~/.config/opshub/agents.
+opshub tui -a claude-code -a codex
 
-# search every session you ever ran
+# search every session you ever ran (FTS5 over ANSI-stripped stdout)
 opshub search "authentication bug"
 ```
+
+Per-agent cost (`$`) and a 60-second `tok/s` window appear in the header as
+soon as the upstream CLI writes its first usage record — Claude Code's
+`~/.claude/projects/<cwd>/<session>.jsonl` or Codex's
+`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Unknown models fall back to
+`$0.00` with a log-only warning.
 
 ## Roadmap
 

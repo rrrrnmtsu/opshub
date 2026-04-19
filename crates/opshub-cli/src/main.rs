@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use opshub_core::paths::default_db_path;
+use opshub_core::paths::{default_db_path, user_agents_dir};
 use opshub_core::Storage;
 use opshub_runner::{spawn_agent, AgentProfile, RunnerEvent, WinSize};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::signal::ctrl_c;
 use tracing_subscriber::EnvFilter;
 
@@ -23,9 +23,12 @@ struct Cli {
 enum Cmd {
     /// Spawn an agent under a PTY and stream its output into the opshub DB.
     Launch {
-        /// Path to a YAML profile. If omitted, --command is required.
+        /// Path to a YAML profile. If omitted, --agent or --command is required.
         #[arg(short, long)]
         profile: Option<PathBuf>,
+        /// Agent name resolved against the user agents dir (see `opshub agents`).
+        #[arg(short, long)]
+        agent: Option<String>,
         /// Logical agent id (required when using --command).
         #[arg(long)]
         id: Option<String>,
@@ -42,12 +45,18 @@ enum Cmd {
     },
     /// Print the database file path opshub will use.
     DbPath,
+    /// List available agent profiles under the user agents dir.
+    Agents,
     /// Launch one or more agents inside a ratatui grid. Tab cycles focus,
-    /// Ctrl-Q quits.
+    /// Ctrl-Q quits, Ctrl-M toggles the metrics row.
     Tui {
         /// YAML profile path. Repeat the flag to load multiple agents.
-        #[arg(short, long, required = true)]
+        #[arg(short, long)]
         profile: Vec<PathBuf>,
+        /// Agent name resolved against the user agents dir. Repeat the flag
+        /// to launch multiple. Mix freely with --profile.
+        #[arg(short, long)]
+        agent: Vec<String>,
     },
 }
 
@@ -71,6 +80,40 @@ async fn main() -> Result<()> {
             println!("{}", db_path.display());
             Ok(())
         }
+        Cmd::Agents => {
+            let dir = user_agents_dir().context("resolve user agents dir")?;
+            if !dir.exists() {
+                eprintln!(
+                    "no agents installed yet. Drop YAML files into {}",
+                    dir.display()
+                );
+                return Ok(());
+            }
+            let mut names: Vec<String> = std::fs::read_dir(&dir)
+                .with_context(|| format!("read {}", dir.display()))?
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let p = e.path();
+                    if p.extension().and_then(|s| s.to_str()) == Some("yaml") {
+                        p.file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            names.sort();
+            if names.is_empty() {
+                eprintln!("(no .yaml profiles in {})", dir.display());
+            } else {
+                println!("# {}", dir.display());
+                for n in names {
+                    println!("{n}");
+                }
+            }
+            Ok(())
+        }
         Cmd::Search { query, limit } => {
             let storage = Storage::open(&db_path)?;
             let hits = storage.search(&query, limit)?;
@@ -86,10 +129,11 @@ async fn main() -> Result<()> {
         }
         Cmd::Launch {
             profile,
+            agent,
             id,
             command,
         } => {
-            let profile = resolve_profile(profile, id, command)?;
+            let profile = resolve_profile(profile, agent, id, command)?;
             let storage = Storage::open(&db_path)?;
             let running =
                 spawn_agent(profile, storage, WinSize::default()).context("spawn_agent")?;
@@ -98,7 +142,7 @@ async fn main() -> Result<()> {
             let mut rx = running.subscribe();
 
             // Mirror PTY bytes to our own stdout so the user still sees the
-            // agent. The real TUI arrives in a later MVP slice.
+            // agent. The real TUI arrives via `opshub tui`.
             let stream_task = tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
@@ -140,13 +184,24 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Tui { profile } => {
+        Cmd::Tui { profile, agent } => {
+            if profile.is_empty() && agent.is_empty() {
+                anyhow::bail!(
+                    "at least one --profile or --agent is required. `opshub agents` lists what's installed."
+                );
+            }
             let storage = Storage::open(&db_path)?;
-            let mut agents = Vec::with_capacity(profile.len());
+            let mut agents = Vec::with_capacity(profile.len() + agent.len());
             for path in &profile {
-                let p = resolve_profile(Some(path.clone()), None, None)?;
+                let p = load_profile_from_path(path)?;
                 let running = spawn_agent(p, storage.clone(), WinSize::default())
                     .with_context(|| format!("spawn {}", path.display()))?;
+                agents.push(running);
+            }
+            for name in &agent {
+                let p = load_profile_from_name(name)?;
+                let running = spawn_agent(p, storage.clone(), WinSize::default())
+                    .with_context(|| format!("spawn agent {name}"))?;
                 agents.push(running);
             }
             opshub_tui::run(opshub_tui::AppOptions {
@@ -160,17 +215,17 @@ async fn main() -> Result<()> {
 
 fn resolve_profile(
     profile: Option<PathBuf>,
+    agent: Option<String>,
     id: Option<String>,
     command: Option<String>,
 ) -> Result<AgentProfile> {
     if let Some(path) = profile {
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("read profile {}", path.display()))?;
-        let p: AgentProfile = serde_yaml::from_str(&text)
-            .with_context(|| format!("parse profile {}", path.display()))?;
-        return Ok(p);
+        return load_profile_from_path(&path);
     }
-    let cmd = command.context("either --profile or --command is required")?;
+    if let Some(name) = agent {
+        return load_profile_from_name(&name);
+    }
+    let cmd = command.context("one of --profile, --agent, or --command is required")?;
     let mut parts = cmd.split_whitespace();
     let bin = parts
         .next()
@@ -186,4 +241,35 @@ fn resolve_profile(
         cwd: None,
         env: vec![],
     })
+}
+
+fn load_profile_from_path(path: &Path) -> Result<AgentProfile> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read profile {}", path.display()))?;
+    serde_yaml::from_str(&text).with_context(|| format!("parse profile {}", path.display()))
+}
+
+/// Resolve a bare name like `claude-code` to a YAML profile. Search order:
+///   1. `~/.config/opshub/agents/<name>.yaml` (user-installed)
+///   2. `./agents/<name>.yaml` relative to CWD (dev-checkout convenience)
+fn load_profile_from_name(name: &str) -> Result<AgentProfile> {
+    let mut tried: Vec<PathBuf> = Vec::new();
+    if let Ok(user_dir) = user_agents_dir() {
+        let p = user_dir.join(format!("{name}.yaml"));
+        if p.exists() {
+            return load_profile_from_path(&p);
+        }
+        tried.push(p);
+    }
+    let local = PathBuf::from("agents").join(format!("{name}.yaml"));
+    if local.exists() {
+        return load_profile_from_path(&local);
+    }
+    tried.push(local);
+    let tried_str = tried
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::bail!("agent profile {name:?} not found (tried: {tried_str})")
 }
